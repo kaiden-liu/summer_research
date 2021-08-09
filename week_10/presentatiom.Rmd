@@ -1,0 +1,503 @@
+---
+title: "Microbiome Data Analysis"
+author: "Kaiden Liu"
+date: "30/06/2021"
+output:
+  beamer_presentation:
+    colortheme: "crane"
+    fonttheme: "Default"
+---
+
+# Motivation
+
+
+
+## What is DNA sequencing
+
+- DNA sequencing is the process of determining the nucleic acid sequence.
+
+- Comparing healthy and mutated DNA sequences can diagnose different diseases
+
+
+## High-throughput sequencing
+
+- also known as Next Generation Sequencing
+
+- allows the entire DNA strand to be sequenced at once by breaking it into small pieces, and sequenced them all at once
+
+- lower computational cost per sample/ quicker
+
+
+## Applications
+
+- Reduced Lactobacillus species in the vagina is a risk factor for
+premature birth  [^1][^3]
+
+- detect pathogen in human respiratory system and brain biopsies
+
+- Low biomass biological specimens have less reproducible sequences  [^2][^3]
+
+[^1]:Callahan et al., 2017; DiGiulio et al., 2015
+[^2]: Gu et al., 2019; Langelier et al., 2018; Schlaberg et al., 2017b; Wilson et al., 2014; Brown et al., 2018
+[^3]: Jeganathan et al., 2021
+
+
+## Low biomass specimens
+
+- eg) saliva, blood
+
+- Low biomass specimens produce low abundance of DNA
+
+
+### Challenges
+
+- sensitive to contamination (eg: reagent to extract DNA, lab environment)    
+
+
+## Challenges
+
+- library depth
+
+  - microbiome samples are sequenced at the same time, but they often result in total different numbers of sequences
+  
+    - proportional abundance
+    
+    - rarefy abundances
+    
+  - Improvements provided by with hierarchical mixture model 
+  
+- batch effect
+
+  - non-biological factors in an experiment causes changes in the data.
+  
+^[Waste Not, Want Not: Why Rarefying Microbiome Data Is Inadmissible(McMurdie and Holmes, 2014)]
+
+
+# Phyloseq
+
+
+## 1) OTU table  
+
+- row: taxa/OTU
+
+    - groups of closely related bacteria based on sequence similarity
+    
+- column: sample
+
+- value: the number of reads
+
+\tiny
+```{r echo=F}
+set.seed(526)
+otumat = matrix(sample(0:100, 100, replace = TRUE,prob=c(0.5,rep(0.5/100,100))), nrow = 10, ncol = 10)
+rownames(otumat) <- paste0("OTU", 1:nrow(otumat))
+colnames(otumat) <- paste0("Sample", 1:ncol(otumat))
+otumat
+```
+\normalsize
+
+## 2) taxonomy table   
+
+![taxonomy rank](Animals-groups-organisms-succession-general-particular.jpg){width=50%}
+
+## Taxonomy table
+
+Table of names of the taxonomic rank of the data
+
+* row: OTU  
+* column: taxonomy rank(levels)  
+* value: names of the taxonomy
+
+&nbsp;
+
+\scriptsize 
+```{r, echo=F}
+taxmat = matrix(sample(letters, 70, replace = TRUE), 
+                nrow = nrow(otumat), ncol = 7)
+rownames(taxmat) <- rownames(otumat)
+colnames(taxmat) <- c("Domain", "Phylum", "Class", 
+                      "Order", "Family", "Genus", "Species")
+taxmat
+```
+\normalsize
+
+\scriptsize
+```{r, echo=F }
+library("phyloseq")
+OTU = otu_table(otumat, taxa_are_rows = TRUE)
+TAX = tax_table(taxmat)
+
+physeq = phyloseq(OTU, TAX)
+```
+\normalsize
+
+## Taxonomy Table
+
+![human](human-taxonomy-diagram.jpg)
+
+
+## 3) sample variables  
+
+* Location: Location of where the sample is collected(eg: Feces, Blood, Skin)
+* Depth: Number of times sample has been read
+
+\scriptsize
+```{R, echo=F}
+set.seed(999)
+sampledata = sample_data(data.frame(
+  Location = sample(LETTERS[1:4], size=nsamples(physeq), replace=TRUE),
+  Depth = sample(50:1000, size=nsamples(physeq), replace=TRUE),
+  row.names=sample_names(physeq),
+  stringsAsFactors=FALSE
+))
+sampledata
+```
+\normalsize
+
+## 4) phylogenetic Tree
+
+Shows how the different taxa are related.  
+
+\scriptsize
+```{R, echo=F}
+library("ape")
+random_tree = rtree(ntaxa(physeq), rooted=TRUE, 
+                    tip.label=taxa_names(physeq))
+plot(random_tree)
+```
+\normalsize
+
+## 5) Phyloseq object
+
+\scriptsize
+```{R, echo=F}
+physeq1 = merge_phyloseq(physeq, sampledata, random_tree)
+physeq1
+```
+
+\normalsize
+
+
+# Application
+
+## Zymo
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{R, include=F}
+library(dada2); packageVersion("dada2")
+```
+
+\scriptsize
+```{R}
+path <- file.path("RawSeq") 
+list.files(path)
+```
+\normalsize
+
+## fastq file
+
+![fastq file](fastq_files_explained_image.png)
+
+
+1) Name of the read
+
+2) Sequence 
+
+3) place holder line
+
+4) Quality score with respect to each base in the sequence.
+
+Let's learn about the quality score
+
+## Quality Score
+
+```{R, include=F}
+fns <- sort(list.files(path, full.names = TRUE))
+fnFs <- fns[grepl("R1", fns)]
+fnRs <- fns[grepl("R2", fns)]
+
+#proper strisplit to get the full name of the files
+sample.names <- sapply(strsplit(basename(fnFs), "_R"), `[`, 1)
+```
+
+```{R, cache=T}
+plotQualityProfile(fnFs[1:2])
+plotQualityProfile(fnRs[1:2])
+```
+
+
+## Trim 
+
+```{R, include=F, cache=T}
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+```{R, cache=T, include=F}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(320,180),
+              maxN=0, maxEE=c(10,10), truncQ=6, trimLeft = c(16,24), rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE)
+```
+
+```{R}
+head(out)
+```
+
+## Generating model of our data
+
+```{R, cache=T, include=F}
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+```
+
+```{R, fig.height=5}
+plotErrors(errF)
+
+```
+
+Black line: estimated error rates 
+
+Black dots: observed error rates for each consensus quality score.
+
+
+## Sample Inference
+
+```{R, eval=F}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+
+```{R, cache=TRUE, include=F}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+
+Removes all sequencing errors to reveal the true biological sequences. 
+
+^[DADA2: High-resolution sample inference from Illumina amplicon data, https://www.nature.com/articles/nmeth.3869#methods]
+
+## Merger
+
+\tiny
+```{R, cache=T}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE, minOverlap = 12)
+
+```
+\normalsize
+
+Reconstruct the full target sequence by merging each denoised pair of forward and reverse reads, rejecting any pairs which do not sufficiently overlap
+
+^[Callahan BJ, McMurdie PJ, Rosen MJ, Han AW, Johnson AJA, Holmes SP (2016).]
+
+## Track reads through the pipeline
+
+```{R, include=F}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+table(nchar(getSequences(seqtab)))
+seqtab <- seqtab[,nchar(colnames(seqtab)) %in% seq(310,430)]
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+```
+
+```{R, echo=F}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(mergers, getN))
+colnames(track) <- c("input", "filtered", "merged")
+rownames(track) <- sample.names
+head(track)
+```
+
+Most reads drops in the filter step but not the merge steps, which is a good sign. 
+
+## Assign taxonomy
+
+&nbsp;
+
+\tiny
+```{r, cache=TRUE}
+taxa <- assignTaxonomy(seqtab.nochim, "./tax/silva_nr99_v138.1_train_set.fa.gz", multithread = TRUE)
+
+taxa.print <- taxa
+```
+\normalsize
+
+```{r, include = F, cache=TRUE}
+taxa <- addSpecies(taxa, "./tax/silva_species_assignment_v138.1.fa.gz", allowMultiple = TRUE)
+taxa.print <- taxa
+```
+
+### Assign taxonomy 
+
+
+\tiny
+```{r, include=F}
+rownames_ex <- rownames(taxa.print)
+rownames(taxa.print) <- NULL
+```
+
+```{R}
+head(taxa.print)
+```
+\normalsize
+
+## Assign taxonomy 
+
+
+![taxonomy rank](Animals-groups-organisms-succession-general-particular.jpg){width=50%}
+
+\tiny
+```{R}
+head(rownames_ex)
+```
+\normalsize
+
+## Phyloseq
+
+```{R, include=F}
+library(phyloseq); packageVersion("phyloseq")
+library(Biostrings); packageVersion("Biostrings")
+library(ggplot2); packageVersion("ggplot2")
+library(stringr)
+library(readxl)
+library(dplyr)
+theme_set(theme_bw())
+```
+
+
+```{r, include=F}
+samples.out <- rownames(seqtab.nochim)
+sampleID <- substr(samples.out, 8,9)
+SampleType <- ifelse(sampleID %in% as.character(seq(1,10)), "Negative", "Standard")
+old.new.sampleID <- readxl::read_excel("./tax/mappingTable.xlsx", col_names = FALSE) %>% data.frame
+colnames(old.new.sampleID) <- c("SubjectID", "Name")
+old.new.sampleID$SubjectID <- gsub("\\_", ".", old.new.sampleID$SubjectID)
+samdf <- data.frame(SubjectID = samples.out, sampleID = samples.out, SampleType = SampleType)
+samdf$SubjectID <- gsub("\\_", ".", samdf$SubjectID)
+samdf <- left_join(samdf, old.new.sampleID, by = "SubjectID")
+rownames(samdf) <- samples.out
+```
+
+\tiny
+```{r}
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               sample_data(samdf), 
+               tax_table(taxa))
+ps
+```
+\normalsize
+
+```{R, eval=F, echo=F}
+saveRDS(ps, "./tax/ps_zymo.rds")
+```
+
+```{R, include=F }
+ps <- readRDS("./tax/ps_zymo.rds")
+```
+
+# Exploratory analysis
+
+## Sample data
+
+\tiny
+```{R, echo=F}
+sample_data(ps)
+```
+\normalsize
+
+## Alpha-Diversity
+
+\tiny
+```{r }
+plot_richness(ps, x="SampleType", measures = c("Shannon", "Simpson"), color = "SampleType")
+```
+\normalsize
+
+
+## MDS plots
+
+\tiny
+```{r, echo=F}
+ps.prop <- transform_sample_counts(ps, function(otu) otu/sum(otu))
+ord.mds.bray <- ordinate(ps.prop, method="MDS", distance="bray")
+evals <- ord.mds.bray$values$Eigenvalues
+p <- plot_ordination(ps.prop, ord.mds.bray, color="SampleType", title="PCoA with Bray-Curtis Dissimilarity")+ 
+  theme_bw() +
+  coord_fixed(sqrt(evals[2] / evals[1])) +
+  theme(plot.title = element_text(hjust = 0.5))
+p
+```
+\normalsize
+
+## MDS plots
+
+We want to map our data from a high dimension to a low dimension,
+so we can visualize the similarities of data(by how close they are).
+
+The biggest difference of a PCoA is the construction of a distance matrix. 
+
+- For abundance data, Bray-Curtis distance is often recommended.
+
+```{r, include=F}
+ncont <- paste0("NegativeControl.",seq(1,10))
+stan <- paste0("Standard.Dilution.1.",c(1,6,36,216,1296,7776,46656,279936))
+#stan <- c(paste0("Standard.Dilution.1.",c(1,6,36,216,1296,7776,46656)),"StandardDilution.1.279936")
+sample_data(ps)$Name <- factor(sample_data(ps)$Name, levels = c(ncont,stan))
+```
+
+
+## Top 20 ASVs in both control and dilution series samples
+
+\tiny
+```{r}
+top20 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:20]
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.top20 <- prune_taxa(top20, ps.top20)
+plot_bar(ps.top20, x="Name", fill="Genus") + facet_wrap(~SampleType, scales="free_x") + labs(y="Relative Abundance")
+```
+\normalsize
+
+## Contaminant ASVs 
+
+![ralstoniaWikipedia](contampic.png)
+
+Zymobiomic is a DNA extraction kit.
+
+## Plot heatmap
+
+![heatmap](heatmap_top.png){width=90%}
+
+# What's next?
+
+## Challenges
+
+### Diagnosis of suspected sepsis
+
+![Application Example](motivation_sepsis_edit.png)
+"Contaminant sequence identification and computational removal represents one of the greatest barriers to expanding the clinical application of metagenomic sequencing, especially in specimens with low microbial biomass such as blood."
+
+^[Combined use of metagenomic sequencing and host response profiling
+for the diagnosis of suspected sepsis (Cheng et al., 2019).]
+
+## BARBI
+
+Bayesian Reference analysis in the Background Interference
+
+infers the true intensity of each taxon using of hierarchical gamma-Poisson mixture model
+
+1) True reads intensity parameter
+
+2) Contamination intensity parameter
+
+3) Library depth effect
+
+4) Metropolis-Hasting Markov chain Monte Carlo
+
+5) 95% highest posterior density(HPD)
+
+^[A Bayesian Approach to Contamination Removal in Molecular Microbial Studies, (Jeganathan et al., 2021)]
+
+
