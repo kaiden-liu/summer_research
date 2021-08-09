@@ -1,0 +1,110 @@
+---
+title: "Testing 2"
+output: pdf_document
+---
+
+```{R}
+set.seed(1999)
+n<-1000
+lambda <- 5
+data<-rpois(n, lambda)
+barplot(table(data)/n,col="blue",main="Poisson distribution n=1000")
+```
+
+```{R}
+Poisson_Dist<-function(x,lambda){
+  p<-1
+  for(i in 0:max(x)){
+    p<-p*exp(-lambda)*lambda^i/factorial(i)
+  }
+  p
+}
+```
+
+## Likelihood
+
+Dividing the data by the sum of data so it sums to 1? --> for simpler calculation for posterior
+```{r}
+Likelihood<-function(x){ 
+  likeli<-NULL
+  for( i in 0:max(x)){
+     p<-Poisson_Dist(x,lambda=i)
+     likeli<-rbind(likeli,c(i,p))
+  }
+  # note
+  likeli[,2]<-likeli[,2]/sum(likeli[,2])
+  
+  likeli<-data.frame(likeli)
+  names(likeli)<-c("lambda","Likelihood")
+  likeli
+}
+```
+
+```{R}
+
+LkPoi<-Likelihood(x=data)
+plot(LkPoi,col=3,type="l",main="Likelihood")
+
+LkPoi
+```
+
+# Prior
+
+shape: Alpha
+rate: Beta
+```{R}
+prior<-dgamma(x=0:max(data),shape=5,rate=1)
+plot(x=0:max(data),y=prior,col=2,type="l", main="Prior",xlab="lambda")
+```
+## Posterior
+
+```{R}
+Posterior<-function(x,a){
+  i<-seq(0,max(x))
+  p<-Likelihood(x)$Likelihood*dgamma(i,shape=a,rate=1)
+  Post<-data.frame(i,p)
+  names(Post)<-c("Lambda","posterior")
+  Post
+  }
+```
+
+```{R}
+Post <- Posterior(x=data, a=lambda)
+plot(Post,col="red",type="l", main= "Posterior distribution")
+
+library(bayestestR)
+map_estimate(Post)
+
+ci_hdi <- ci(Post$Lambda, method = "ETI")
+ci_hdi
+```
+
+# Prior 2
+
+```{R}
+prior<-dunif(x=0:max(data),0,max(data))
+plot(x=0:max(data),y=prior,col=2,type="l", main="Prior",xlab="lambda")
+```
+
+## Posterior
+
+```{R}
+Posterior<-function(x,a){
+  i<-seq(0,max(x))
+  p<-Likelihood(x)$Likelihood*dunif(x=0:max(x),0,max(x))
+  Post<-data.frame(i,p)
+  names(Post)<-c("Lambda","posterior")
+  Post
+  }
+```
+
+```{R}
+Post <- Posterior(x=data, a=lambda)
+plot(Post,col="red",type="l", main= "Posterior distribution")
+
+library(bayestestR)
+map_estimate(Post)
+
+ci_hdi <- ci(Post$Lambda, method = "HDI")
+ci_hdi
+```
