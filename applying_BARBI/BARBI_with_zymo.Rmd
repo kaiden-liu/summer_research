@@ -1,0 +1,696 @@
+---
+title: "zymo3"
+output: pdf_document
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+### Library
+
+```{R}
+library(dada2); packageVersion("dada2")
+```
+
+&nbsp;
+
+### File path
+
+```{R}
+path <- file.path("RawSeq")
+list.files(path)
+```
+
+&nbsp;
+
+### Create object for forward fastq and reverse fastq
+
+
+```{R}
+fns <- sort(list.files(path, full.names = TRUE))
+fnFs <- fns[grepl("R1", fns)]
+fnRs <- fns[grepl("R2", fns)]
+
+#proper strisplit to get the full name of the files
+sample.names <- sapply(strsplit(basename(fnFs), "_R"), `[`, 1)
+```
+
+```{R}
+plotQualityProfile(fnFs[1:2])
+plotQualityProfile(fnRs[1:2])
+```
+
+&nbsp;
+
+### Assign filenames for filtered fastq.gz files
+
+```{R}
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+&nbsp;
+
+#### saving the output as file so I don't need to run this code chunk everytime
+```{R eval=FALSE, cache=TRUE}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(320,180),
+              maxN=0, maxEE=c(10,10), truncQ=6, trimLeft = c(10,15), rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE)
+
+save(out, file="out.RData")
+```
+
+ideally to remove the first little part with trimLeft
+
+
+```{R}
+load("out.RData")
+head(out)
+```
+
+```{R eval=FALSE, cache=TRUE}
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+save(errF, file="errF.RData")
+save(errR, file="errR.RData")
+```
+
+
+```{R}
+load("errF.RData")
+load("errR.RData")
+
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+```
+	
+Transformation introduced infinite values in continuous y-axis
+
+&nbsp;
+
+### Apply the core sample inference alogrithm to both the filtered and trimmed sequence data
+
+```{R, cache=TRUE}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+
+```{R}
+dadaFs[[1]]
+```
+
+&nbsp;
+
+### Obtain the full denoised sequence
+
+is it possible to create 3 objects in a function to try out different parameters
+```{R}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE, minOverlap = 12)
+
+```
+```{R}
+head(mergers[[1]])
+```
+
+&nbsp;
+
+## Construct sequence table
+
+```{R}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+```
+
+#### Distribution of sequence lengths
+
+```{R}
+table(nchar(getSequences(seqtab)))
+```
+
+&nbsp;
+
+#### Remove non-target-length sequence
+
+Want to make sure if this could work
+```{R}
+seqtab <- seqtab[,nchar(colnames(seqtab)) %in% seq(399,443)]
+
+table(nchar(getSequences(seqtab)))
+```
+
+&nbsp;
+
+## Remove chimeras
+
+```{R}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+&nbsp;
+
+## Track reads through the pipeline
+```{R}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+```
+
+Most reads drops in the filter step, which is a good sign. 
+
+Not too many reads are removed in the chimeras steps, which is a good sign.
+
+&nbsp;
+
+### Assign taxonomy
+
+#### Silva reference database
+
+use in classifying prokaryotic 16S sequencing data
+
+```{R}
+taxa <- assignTaxonomy(seqtab.nochim, "./tax/silva_nr99_v138.1_train_set.fa.gz", multithread=TRUE)
+```
+
+&nbsp;
+
+#### exact matching ASVs and sequenced reference strains to assign species
+
+```{R}
+taxa <- addSpecies(taxa, "./tax/silva_species_assignment_v138.1.fa.gz")
+```
+
+&nbsp;
+
+#### taxonomy table
+
+```{R}
+taxa.print <- taxa
+rownames(taxa.print) <- NULL
+head(taxa.print)
+```
+
+&nbsp;
+
+## Phyloseq 
+
+### Library
+```{R}
+library(phyloseq); packageVersion("phyloseq")
+library(Biostrings); packageVersion("Biostrings")
+library(ggplot2); packageVersion("ggplot2")
+library(stringr)
+library(readxl)
+theme_set(theme_bw())
+```
+&nbsp;
+
+### Should have a file for sample data
+
+samples.out <- rownames(seqtab.nochim)
+subject <- sapply(strsplit(samples.out, "D"), `[`, 1)
+gender <- substr(subject,1,1)
+subject <- substr(subject,2,999)
+day <- as.integer(sapply(strsplit(samples.out, "D"), `[`, 2))
+samdf <- data.frame(Subject=subject, Gender=gender, Day=day)
+samdf$When <- "Early"
+samdf$When[samdf$Day>100] <- "Late"
+rownames(samdf) <- samples.out
+
+```{R}
+samples.out <- rownames(seqtab.nochim)
+subject <- sapply(strsplit(samples.out, "_"), `[`, 2)
+sampleTest<-ifelse(subject<=10, "Negative", "Standard")
+
+sampleData<- read_excel("./tax/mappingTable.xlsx", col_names=FALSE) %>% data.frame
+colnames(sampleData) <- c("Name", "Value")
+sampleData$Test <- ifelse(str_detect(sampleData[[2]], "Negative"), "Negative", "Standard" )
+rownames(sampleData) <- sampleData[[1]]
+```
+
+&nbsp;
+
+### Construct phyloseq object
+
+```{R}
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               tax_table(taxa),
+               sample_data(sampleData))
+ps
+
+saveRDS(ps, "./tax/ps_zymo.rds")
+```
+
+&nbsp;
+
+#### Alpha-diversity
+
+```{R}
+plot_richness(ps, x="Test", measures=c("Shannon", "Simpson"), color="Test")
+```
+
+&nbsp;
+
+#### Ordination Plot
+
+```{R}
+ps.prop <- transform_sample_counts(ps, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+```
+
+```{R}
+plot_ordination(ps, ord.nmds.bray, color="Test", title="Bray NMDS")
+```
+
+&nbsp;
+
+#### Bar plot
+
+```{R}
+top20 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:20]
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.top20 <- prune_taxa(top20, ps.top20)
+plot_bar(ps.top20, x="Name", fill="Genus") + facet_wrap(~Test, scales="free_x") + labs(y="Relative Abundance")
+```
+
+&nbsp;
+
+### Library
+
+```{R}
+setup_example<- (c("igraph", "phyloseq", "phyloseqGraphTest", "ggnetwork", "intergraph","gridExtra"))
+
+lapply(setup_example,require, character.only=TRUE)
+```
+
+&nbsp;
+
+#### Minimum Spanning Tree
+```{R}
+gt <- graph_perm_test(ps, "Test", grouping = "Name",
+			 distance = "jaccard", type = "mst")
+gt$pval
+```
+&nbsp;
+
+```{R}
+plotNet1=plot_test_network(gt) + theme(legend.text = element_text(size = 8),
+         legend.title = element_text(size = 9))
+plotPerm1=plot_permutations(gt)
+grid.arrange(ncol = 2, plotNet1, plotPerm1)
+```
+
+Can we claim the Negative control sample in the top left corner as a possible contaminant?
+
+&nbsp;
+
+#### Two-nearest neighbors with the Bray-Curtis dissimilarity
+
+```{R}
+gt <- graph_perm_test(ps, "Test", grouping = "Name",
+			 distance = "jaccard", type = "knn", knn = 1)
+gt$pval
+```
+
+```{R}
+plotNet1=plot_test_network(gt) + theme(legend.text = element_text(size = 8),
+         legend.title = element_text(size = 9))
+plotPerm1=plot_permutations(gt)
+grid.arrange(ncol = 2, plotNet1, plotPerm1)
+```
+
+Both graph-based visualization shows that number of pure edges is more than the test statistics, so we reject the null hypotehsis of two samples come from the same distribution.
+
+&nbsp;
+
+## BARBI
+
+Reference: https://pratheepaj.github.io/BARBI/articles/BARBI.html
+
+### Library
+
+```{R}
+library(BARBI)
+library(phyloseq)
+library(dplyr)
+library(HDInterval)
+library(grid)
+library(gtable)
+library(gridExtra)
+library(magrittr)
+library(ggplot2)
+library(DESeq2)
+library(reshape2)
+library(ggwordcloud)
+```
+
+```{R}
+if(dim(otu_table(ps))[1]!=ntaxa(ps)){
+  otu_table(ps) <- t(otu_table(ps))}
+```
+
+```{R}
+blocks <- rep("Set1", nsamples(ps))
+
+sample_data(ps)$block <- blocks
+```
+
+```{R}
+ps2 <- prune_taxa(taxa_sums(ps) > 0, ps)
+ps_specimen <-  subset_samples(ps2, 
+                               Test %in% c("Standard"))
+prevTaxaP <- apply(otu_table(ps_specimen), 1,
+                   function(x){sum(x>0)})
+
+Contaminants1 <- names(prevTaxaP)[prevTaxaP == 0]
+ps2 <- prune_taxa(prevTaxaP > 0, ps2)
+ps2
+
+
+```
+Had 247 taxa, but 71 remained
+
+&nbsp;
+
+### Library Depth
+
+```{R}
+totalReads <- colSums(otu_table(ps))
+hist(log(totalReads), 
+     yaxs="i", 
+     xaxs="i", 
+     main="Distribution of total reads per sample", 
+     breaks=50)
+```
+
+&nbsp;
+
+### Phyloseq for BARBI method
+
+I should consider changing Test column to sampleType and Name to sampleID
+
+```{R}
+psBlockResult <- psBlockResults(ps, 
+                               sampleTypeVar = "SampleType",
+                               caselevels = c("Standard"),
+                               controllevel = c("Negative"),
+                               sampleName = "sampleID", 
+                               blockVar = "block")
+
+psByBlock <- psBlockResult[[1]] # The original phyloseq object
+psNCbyBlock <- psBlockResult[[2]] # Negative Control Samples
+psallzeroInNC <- psBlockResult[[3]] # prevalence of zero
+psPlByBlock <- psBlockResult[[4]] # specimen samples
+```
+
+&nbsp;
+
+### Estimate parameters for contaminant intensities in negative control samples
+
+partial information about contamination intensities available in
+negative controls
+
+```{R}
+source("C:/Users/kaide/Documents/Summer_Research/week/week 11/R_BARBI_CJS/alphaBetaNegControl_updated.R")
+con_int_neg_ctrl <- alphaBetaNegControl_updated(psNCbyBlock = psNCbyBlock)
+source("C:/Users/kaide/Documents/Summer_Research/week/week 11/alphaBetaNegControl_test.R")
+con_int_neg_ctrl_test <- alphaBetaNegControl_test(psNCbyBlock = psNCbyBlock)
+```
+
+&nbsp;
+
+#### Density parameters for contaminant intensities 
+
+should this be true intensities
+
+```{R}
+num_blks <- length(con_int_neg_ctrl)
+blks <- seq(1, num_blks) %>% as.list
+
+con_int_specimen <- lapply(blks, function(x){
+    con_int_specimen_each_blk <- alphaBetaContInPlasma(psPlByBlock = psPlByBlock,
+                                                       psallzeroInNC = psallzeroInNC,
+                                                       blk = x,
+                                                       alphaBetaNegControl = con_int_neg_ctrl)
+        return(con_int_specimen_each_blk)
+})
+```
+
+&nbsp;
+
+### Sample from marginal posterior for true intensities
+
+```{R}
+itera = 100
+t1 <- proc.time()
+
+mar_post_true_intensities <- lapply(blks,function(x){
+    mar_post_true_intensities_each_blk <- samplingPosterior(psPlByBlock = psPlByBlock,
+                                                            blk = x,
+                                                            gammaPrior_Cont = con_int_specimen[[x]],
+                                                            itera = itera)
+    return(mar_post_true_intensities_each_blk)
+})
+
+proc.time()-t1
+```
+
+```{R}
+con_int_specimen_mar_post_true_intensities <- list(con_int_specimen, mar_post_true_intensities)
+```
+
+&nbsp;
+
+### Tables for each sample
+
+```{R}
+ASV <- as.character(paste0("ASV_",seq(1,ntaxa(ps))))
+ASV.Genus <- paste0("ASV_",seq(1,ntaxa(ps)),"_",as.character(tax_table(ps)[,6]))
+ASV.Genus.Species <- paste0(ASV,"_",as.character(tax_table(ps)[,6]),"_", as.character(tax_table(ps)[,7]))
+
+df.ASV <- data.frame(seq.variant = taxa_names(ps), ASV = ASV, ASV.Genus = ASV.Genus, ASV.Genus.Species = ASV.Genus.Species)
+```
+
+
+```{R}
+itera <- 100
+burnIn <- 10
+cov.pro <- .95
+mak_tab <- FALSE # Save tables or print tables 
+
+# con_int_specimen_mar_post_true_intensities <- readRDS("./con_int_specimen_mar_post_true_intensities_vignettes.rds")
+
+con_int_specimen <- con_int_specimen_mar_post_true_intensities[[1]]
+mar_post_true_intensities <- con_int_specimen_mar_post_true_intensities[[2]]
+
+## Keep true 
+all_true_taxa_blk <- list()
+
+for(blk in 1:num_blks){
+
+  mar_post_true_intensities_blk <- mar_post_true_intensities[[blk]]
+  con_int_specimen_blk <- con_int_specimen[[blk]]
+
+  all_true_taxa <- character()
+
+  for(sam in 1:nsamples(psPlByBlock[[blk]])){
+      taxa_post <- mar_post_true_intensities_blk[[sam]]
+      acceptance <- list()
+      lower.r <- list()
+      upper.r <- list()
+      lower.c <- list()
+      upper.c <- list()
+      all.zero.nc <- list()
+
+      for(taxa in 1:length(taxa_post)){
+        burnIn  <- burnIn
+        acceptance[[taxa]]  <-  1 - mean(duplicated(taxa_post[[taxa]][-(1:burnIn),]))
+
+        HPD.r <- hdi(taxa_post[[taxa]][-(1:burnIn),],
+                    credMass = cov.pro)
+        lower.r[[taxa]] <- round(HPD.r[1], digits = 0)
+        upper.r[[taxa]] <- round(HPD.r[2], digits = 0)
+        lamda.c <- rgamma((itera-burnIn+1), 
+                    shape= con_int_specimen_blk[[sam]][[1]][taxa],
+                    rate = con_int_specimen_blk[[sam]][[2]][taxa])
+        
+        HDI.c <- hdi(lamda.c, credMass = cov.pro)
+        lower.c[[taxa]] <- round(HDI.c[1], digits = 0)
+        upper.c[[taxa]] <- round(HDI.c[2], digits = 0)
+        
+        all.zero.nc[[taxa]] <-  con_int_specimen_blk[[sam]][[5]][taxa]
+      }
+
+    tax_names <- taxa_names(psPlByBlock[[blk]])
+    tax_names <- df.ASV$ASV.Genus[which(as.character(df.ASV$seq.variant) %in%  tax_names)]
+      
+    df <- data.frame(Species = tax_names,
+                    xj = as.numeric(con_int_specimen_blk[[sam]][[3]]),
+                    l.r = unlist(lower.r),
+                    u.r = unlist(upper.r),
+                    l.c = unlist(lower.c),
+                    u.c = unlist(upper.c),
+                    all.zero.nc = unlist(all.zero.nc))
+      
+    
+      # List all true taxa
+      df <- arrange(filter(df,(l.r > u.c) & (l.r > 0)),
+                   desc(xj))
+
+      # If there is no true taxa
+      if(dim(df)[1]==0){
+          df <- data.frame(Species="Negative",
+                           xj="Negative",
+                           l.r="Negative",
+                           u.r="Negative",
+                           l.c ="Negative",
+                           u.c="Negative",
+                           all.zero.nc = "Negative")
+      }
+
+    
+      
+      # collect all true taxa in the specimen
+      all_true_taxa <- c(all_true_taxa,
+                        as.character(df$Species))
+      
+      if(mak_tab){
+        filname <- paste("./",
+                         sample_names(psPlByBlock[[blk]])[sam],
+                        ".png",
+                        sep = "")
+
+        png(filname, height = 600, width = 750)
+
+        df.p <- tableGrob(df)
+        title <- textGrob(sample_names(psPlByBlock[[blk]])[sam], 
+                         gp = gpar(fontsize = 12))
+
+        padding <- unit(0.5,"line")
+
+        df.p <- gtable_add_rows(df.p, 
+                               heights = grobHeight(title) + padding, 
+                               pos = 0)
+
+        df.p <- gtable_add_grob(df.p, 
+                               list(title),
+                               t = 1, 
+                               l = 1, 
+                               r = ncol(df.p))
+
+        grid.newpage()
+        grid.draw(df.p)
+        dev.off()
+        
+      }else{
+        df.p <- tableGrob(df)
+        title <- textGrob(sample_names(psPlByBlock[[blk]])[sam], 
+                         gp = gpar(fontsize = 12))
+
+        padding <- unit(0.5,"line")
+
+        df.p <- gtable_add_rows(df.p, 
+                               heights = grobHeight(title) + padding, 
+                               pos = 0)
+
+        df.p <- gtable_add_grob(df.p, 
+                               list(title),
+                               t = 1, 
+                               l = 1, 
+                               r = ncol(df.p))
+        grid.newpage()
+        grid.draw(df.p)
+      }
+
+      all_true_taxa <- unique(all_true_taxa)
+  }
+
+  all_true_taxa_blk[[blk]] <- all_true_taxa
+}
+```
+
+```{R}
+all_true_taxa_blk <- unlist(all_true_taxa_blk)
+ASV = df.ASV$seq.variant[which(as.character(df.ASV$ASV.Genus) %in% as.character(all_true_taxa_blk))] %>% as.character()
+ps_decon <- prune_taxa(ASV, ps)
+ps_decon
+```
+
+&nbsp;
+
+### LDA
+
+```{R}
+short.sample.names = c(paste0("NC.", c(1,10)), 
+                       paste0("Di.", seq(1,8)), 
+                       paste0("NC.", seq(2,9)))
+sample_names(ps) = short.sample.names
+
+x = t(get_taxa(ps))
+dimnames(x) = NULL
+K = 4
+stan.data <- list(K = K, 
+  V = ncol(x), 
+  D = nrow(x), 
+  n = x, 
+  alpha = rep(1, K), 
+  gamma = rep(0.5, ncol(x),
+              control=list(max_treedepth=50))
+)
+
+stan.fit = LDAtopicmodel(stan_data = stan.data, iter = 100, chains = 1)
+```
+
+attempting to adjust max_treedepth as recommended
+
+&nbsp;
+
+### Extract Posterior samples
+
+```{R}
+samples = rstan::extract(stan.fit, permuted = TRUE, inc_warmup = FALSE, include = TRUE)
+```
+
+&nbsp;
+
+### Word Cloud
+
+```{R}
+beta = samples$beta
+dimnames(beta)[[2]] = c(paste0("Topic ", seq(1,K)))
+
+tax_tab = tax_table(ps) %>% data.frame()
+tax_tab = mutate(tax_tab, seq.variant = rownames(tax_tab))
+
+dimnames(beta)[[3]] =tax_tab[, "seq.variant"]
+beta.all = melt(beta)
+colnames(beta.all) = c("Chain", "Topic", "ASV", "ASV.distribution")
+beta.all$ASV = as.character(beta.all$ASV)
+beta.all = left_join(beta.all, tax_tab, by = c("ASV"= "seq.variant"))
+beta.all$Topic = factor(beta.all$Topic)
+beta.all$ASV = factor(beta.all$ASV)
+```
+
+```{R}
+max.beta.in.each.asv.all.topics = group_by(beta.all, 
+                                           Topic, 
+                                           Family, 
+                                           Genus) %>% summarise(max_beta = max(ASV.distribution)) %>% top_n(10, max_beta) %>% as.data.frame()
+
+
+ggplot(max.beta.in.each.asv.all.topics, 
+                 aes(label = Genus, size = max_beta, color = Family)) + 
+  geom_text_wordcloud() +
+  theme_minimal() +
+  scale_size_area(max_size = 8) + 
+  facet_wrap(~ Topic) + 
+  theme(strip.text.x = element_text(size = 12, face = "bold"))
+```
