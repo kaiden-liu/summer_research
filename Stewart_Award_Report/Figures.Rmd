@@ -1,0 +1,725 @@
+---
+title: "code_test"
+author: "Kaiden Liu"
+date: "17/08/2021"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, cache=TRUE)
+```
+
+```{r, include=F}
+library(BARBI)
+library(tidyverse)
+library(phyloseq)
+library(DESeq2)
+library(HDInterval)
+library(ggrepel)# library(ggrepel)
+library(dplyr)
+library(ggmcmc)
+library(gridExtra)
+#R.utils::sourceDirectory("C:/Users/kaide/Documents/Summer_Research/week/week 11/R_BARBI_CJS")
+```
+
+
+```{r, include=F}
+ps <- readRDS("C:/Users/kaide/Documents/Summer_Research/week/week 17/ps_zymo.rds")
+if(dim(otu_table(ps))[1]!=ntaxa(ps)){otu_table(ps) <- t(otu_table(ps))}
+```
+
+
+### Rename specimens and negative controls
+
+```{r, include=F}
+ncont <- paste0("NegativeControl.",seq(1,10))
+stan <- paste0("Standard.Dilution.1.",c(1,6,36,216,1296,7776,46656,279936))
+
+sample_data(ps)$Name <- factor(sample_data(ps)$Name, levels = c(ncont,stan))
+
+sample_names(ps) <- as.character(sample_data(ps)$Name)
+```
+
+### Rename ASVs
+
+```{r, include=F}
+ASV <- as.character(
+  paste0("ASV_",seq(1,ntaxa(ps))
+         )
+  )
+
+ASV.Genus <- paste0(
+  "ASV_",
+  seq(1,ntaxa(ps)),
+  "_",
+  as.character(tax_table(ps)[,6])
+  )
+
+ASV.Genus.Species <- paste0(
+  ASV,
+  "_",
+  as.character(tax_table(ps)[,6]),
+  "_",
+  as.character(tax_table(ps)[,7])
+  )
+
+df.ASV <- data.frame(
+  seq.variant = taxa_names(ps),
+  ASV = ASV,
+  ASV.Genus = ASV.Genus,
+  ASV.Genus.Species = ASV.Genus.Species
+  )
+
+taxa_names(ps) <- df.ASV$ASV.Genus.Species
+```
+
+
+### Set batch
+
+All specimens are from one batch so we add "Set1" to all specimens and negative controls. 
+
+```{r adding_blocks, include=F}
+blocks <- rep("Set1", nsamples(ps))
+
+sample_data(ps)$block <- blocks
+```
+
+### Pre-processing
+
+We do pre-processing. We remove taxa not in any specimens.  
+
+```{r filter_taxa, include=F}
+ps <- prune_taxa(taxa_sums(ps) > 0, ps)
+ps.standard <- subset_samples(ps, SampleType %in% c("Standard"))
+prevTaxaP <- apply(otu_table(ps.standard), 1,
+                   function(x){sum(x>0)})
+```
+
+We remove taxa not in any dilution series specimens.
+
+```{R, include=F}
+Contaminants1 <- names(prevTaxaP)[prevTaxaP == 0]
+length(Contaminants1)
+ps <- prune_taxa(prevTaxaP > 0, ps)
+ps
+```
+
+### Compute library size
+
+Compute library size of each specimen.
+
+```{r summary_stat, include=F}
+table(sample_data(ps)$SampleType, sample_data(ps)$block)
+colSums(otu_table(ps))
+```
+
+### Consider biological specimens
+
+Prepare data for BARBI.
+
+```{r list_of_phyloseq, include=F}
+psBlockResult <- psBlockResults(ps, sampleTypeVar = "SampleType", caselevels = c("Standard"), controllevel="Negative", sampleName = "Name", blockVar = "block")
+
+psByBlock <- psBlockResult[[1]]
+psNCbyBlock <- psBlockResult[[2]] #contaminant intensity
+psallzeroInNC <- psBlockResult[[3]] # zeros in negative control
+psPlByBlock <- psBlockResult[[4]] # biological smaples
+
+```
+
+\newpage
+
+## Handling library size difference and transformation  
+
+We account for the library size difference in three ways (total reads, rarefying, median-of-ratios) and transform to stabilize the variance (log, inverse hyperbolic sine transformation).
+
+
+
+We use the count matrix for biological specimens. There are 53 taxa and biological specimens. 
+
+```{r}
+otu <- otu_table(psPlByBlock[[1]]) %>% 
+  data.frame()
+```
+
+`otu` has taxa in rows and specimens in columns. 
+
+### Without accounting for library sizes
+ 
+mean-variance dependence
+
+```{r}
+otu_mean_taxa <- apply(otu, 1, mean)
+otu_sd_taxa <- apply(otu, 1, sd)
+
+ggplot(tibble(mean = otu_mean_taxa, sd = otu_sd_taxa )) +
+  geom_point(aes(x = mean, y = sd), color = "blue", size = 2) 
+```
+
+
+### Total reads as an estimate for the library size
+
+We estimate library size using total reads. Next, we divide the count by total reads. Then we apply log transformation. 
+
+```{r, include=F}
+otu <- otu_table(psPlByBlock[[1]]) %>% 
+  data.frame()
+```
+
+`otu` has taxa in rows and specimens in columns. 
+
+
+### Total reads as an estimate for the library size
+
+We estimate library size using total reads. Next, we divide the count by total reads. Then we apply log transformation. 
+
+
+```{r}
+tr <- colSums(otu)
+colSum_otu <- t(t(otu) / tr)
+
+colSum_otu_log <- log(colSum_otu+0.001) # add 0.001 to avoid inf values
+# colSum_otu_log <-colSum_otu
+
+colSum_otu_log_mean_taxa <- apply(colSum_otu_log, 1, mean)
+colSum_otu_log_sd_taxa <- apply(colSum_otu_log, 1, sd)
+
+ggplot(tibble(mean = colSum_otu_log_mean_taxa, sd = colSum_otu_log_sd_taxa )) +
+  geom_point(aes(x = mean, y = sd), color = "blue", size = 2)+ theme_classic()
+
+```
+
+### Rarefying 
+
+For `rarefy`, we need to provide specimens in rows and taxa in columns.
+
+```{R}
+library(vegan)
+
+otu_rarefy <- t(otu)
+
+# observed number of taxa in each specimen
+S <- specnumber(otu_rarefy)
+
+# Subsample size for rarefying community
+raremax <- min(rowSums(otu_rarefy))
+
+raremax <- raremax-86
+# gives 0 taxa
+
+sRare <- rarefy(x = otu_rarefy, sample = raremax)
+
+rarefied_otu <-rrarefy(otu_rarefy, raremax) %>% 
+  t() %>%
+  data.frame
+
+# now library size is set to raremax
+colSums(rarefied_otu)
+
+# arcsinh transformation
+rarefied_otu_asinh <- asinh(rarefied_otu)
+rarefied_otu_asinh_mean_taxa <- apply(rarefied_otu_asinh, 1, mean) 
+rarefied_otu_asinh_sd_taxa <- apply(rarefied_otu_asinh, 1, sd) 
+
+a<- ggplot(tibble(mean = rarefied_otu_asinh_mean_taxa, sd = rarefied_otu_asinh_sd_taxa)) + 
+  geom_point(aes(x = mean, y = sd), color = "blue", size = 2)+ theme_classic()
+
+ggsave("rarefy_500.pdf",plot=a)
+
+```
+
+### DESeq2
+
+```{r}
+ps.to.dq = phyloseq_to_deseq2(
+  psPlByBlock[[1]], 
+  design = ~1
+  )
+
+deseq <- estimateSizeFactors(
+  ps.to.dq, 
+  type="poscounts")
+
+# dj <- sizeFactors(deseq)
+
+after_deseq <- counts(deseq, normalized=TRUE) %>%
+  data.frame # rows are taxa and columns are samples, the entries - otu count diveded by library size scaling factor 
+
+median_ratios_otu_asinh <- asinh(after_deseq)
+# median_ratios_otu_asinh <- (after_deseq)
+
+median_of_ratio_otu_asinh_mean_taxa <- apply(median_ratios_otu_asinh, 1, mean) 
+median_of_ratio_otu_asinh_sd_taxa <- apply(median_ratios_otu_asinh, 1, sd) 
+
+ggplot(tibble(mean = median_of_ratio_otu_asinh_mean_taxa, sd = median_of_ratio_otu_asinh_sd_taxa)) + 
+  geom_point(aes(x = (mean), y = (sd)), color = "blue", size = 2) + theme_classic()
+```
+
+
+\newpage
+## Curious to find out the ASVs with large mean 
+
+\tiny
+```{r}
+rownames(otu)[which(colSum_otu_log_mean_taxa > -4)]
+```
+\normalsize
+
+\tiny
+```{r}
+rownames(otu)[which(rarefied_otu_asinh_mean_taxa > 5)] 
+```
+\normalsize
+
+\tiny
+```{r}
+rownames(otu)[which(median_of_ratio_otu_asinh_mean_taxa > 6)]
+```
+\normalsize
+
+It seems all three methods to handle library sizes produce similar mean-variance plots. The range of values after transformation are different in three methods. 
+
+The cluster on the right in all three plots is related to seven true species and one contaminant species. Some true species have mean and standard deviation that are similar to contaminant species. 
+
+### Comparison plots of three methods: log-transformation, DESeq2, and rarefy
+
+```{R}
+
+break_at_2 <- function(limits) {
+  seq(ceiling(limits[1]), floor(limits[2]), 2)
+}
+
+p_comp<- ggplot(tibble(mean = colSum_otu_log_mean_taxa,
+                       sd = colSum_otu_log_sd_taxa)) +
+  geom_point(aes(x = mean,y = sd,
+                 colour = "log-ratio transformation"), size = 2) +
+  geom_point(aes(x = rarefied_otu_asinh_mean_taxa, 
+                 y = rarefied_otu_asinh_sd_taxa, 
+                 colour="rarefy + arcsinh"), 
+              size = 2) + 
+  geom_point(aes(x = median_of_ratio_otu_asinh_mean_taxa, 
+                 y = median_of_ratio_otu_asinh_sd_taxa, 
+                 colour="median-of-ratio + arcsinh"), 
+              size = 2) +
+  labs(x="Mean", y="Standard Deviation") +
+  theme_classic() + 
+  coord_fixed() + 
+  scale_x_continuous(breaks = break_at_2) +
+  scale_y_continuous(breaks = break_at_2) + 
+  theme(plot.margin=grid::unit(c(0,0,0,0), "mm"))
+
+p_comp
+
+ggsave("comparison.png",plot=p_comp, width=11, height = 7)
+```
+
+### Tables for counts of each ASVs with different transformations
+
+```{R}
+sum_ASV_original<- rowSums(otu)%>%data.frame
+names(sum_ASV_original)<- "Original"
+sum_ASV_rarefied <- rowSums(rarefied_otu)%>%data.frame
+names(sum_ASV_rarefied)<- "Rarefy"
+sum_ASV_deseq<- rowSums(after_deseq)%>%data.frame
+names(sum_ASV_deseq)<- "DESeq2"
+sum_ASV_log<-rowSums(log(otu+0.0001))%>%data.frame
+names(sum_ASV_log)<- "Log"
+
+ASV_table<- cbind(sum_ASV_original,sum_ASV_rarefied,sum_ASV_deseq,sum_ASV_log)
+
+```
+
+### Check if transformation removes any original counts
+```{R}
+zero_after_log<-otu/log(otu)
+sum(sapply(zero_after_log,is.infinite))
+
+zero_trans<- zero_after_rarefy<-otu/rarefied_otu
+sum(sapply(zero_after_rarefy,is.infinite))
+
+zero_after_deseq<-otu/after_deseq
+sum(sapply(zero_after_deseq,is.infinite))
+
+
+```
+
+### Latex output for the table above
+
+```{R}
+
+name<-strsplit(rownames(zero_trans),"_")
+row.names(zero_trans)<-lapply(1:length(name), function(i){name[[i]][1:2]})
+cbind(t(zero_trans['c("ASV", "49")',]),t(otu)[,28])
+
+library(xtable)
+# this table shows the division inf
+xtable(t(zero_trans['c("ASV", "49")',]))
+
+zero_countTable <- t(rbind(otu[28,], rarefied_otu[28,],after_deseq[28,],log(otu+0.0001)[28,]))
+
+colnames(zero_countTable)<- c("Original","Rarefy","DESeq2","Log_proportion")
+
+xtable(zero_countTable)
+
+```
+
+## Sampling
+
+```{r estimate_Cont_ncontrols, include=F}
+alphaBetaNegControl <- alphaBetaNegControl(psNCbyBlock = psNCbyBlock, stringent = FALSE)
+```
+
+```{r estimate_Cont_plasma, include=F}
+num_blks <- length(alphaBetaNegControl)
+blks <- seq(1, num_blks) %>% as.list
+
+gammaPrior_all_blks <- lapply(blks, function(x){
+        gammaPrior <- alphaBetaContInPlasma(psPlByBlock = psPlByBlock, psallzeroInNC = psallzeroInNC, blk = x, alphaBetaNegControl = alphaBetaNegControl)
+        return(gammaPrior)
+})
+
+```
+
+
+
+```{r, include=F}
+# First sample, second taxon
+sam <- 1
+#taxa <- 2
+
+# prior density for contamination intensity in biological samples
+# we have only one batch
+gammaPrior_Cont <- gammaPrior_all_blks[[1]]
+
+# observed count in sam == 1 and second taxa
+k <- as.numeric(gammaPrior_Cont[[sam]]$kij)
+al_c <- gammaPrior_Cont[[sam]]$alpha_ij_c
+be_c <- gammaPrior_Cont[[sam]]$beta_ij_c
+
+asv_num <- length(al_c)
+#check
+length(al_c) == length(be_c)
+asv_num <-seq(1,asv_num)
+
+maxu<- lapply(asv_num, function(i){max(rgamma(n = 1000,shape = al_c[i], rate = be_c[i]))})%>%unlist()
+
+minu<- lapply(asv_num, function(i){min(rgamma(n = 1000,shape = al_c[i], rate = be_c[i]))})%>%unlist()
+
+# +1000 because sometimes, it does not show the full distribution
+
+u <- lapply(asv_num, function(i){seq(minu[i],maxu[i]+1600, by=.1)})
+
+
+#############
+
+post_lr <- lapply(asv_num,function(i){posterior(u[[i]],k[i],al_c[[i]],be_c[[i]])})
+
+
+df <- lapply(asv_num,function(i){data.frame(x=u[[i]],y=post_lr[[i]], ASV=i)})
+
+
+
+df_total<-data.frame()
+for (i in seq(2,5)){
+  df_total <- rbind(df_total,df[[i]])
+}
+
+p<-ggplot(data=df_total,aes(x,y))+ 
+  geom_line(aes(color = factor(ASV))) + 
+  facet_wrap(~ASV, scales = "free", labeller=label_both) + 
+  labs(y= "Density", x = "Counts") + 
+  theme_classic() +
+  theme(legend.position = "none", 
+        strip.background = element_blank(),
+        plot.margin = margin(0.5,0.5,0.5,0.5,"cm"))
+  # theme(axis.title.x=element_text(x="count"),
+  #       axis.text.x=element_blank(),
+  #       axis.ticks.x=element_blank(),
+  #       axis.title.y=element_blank(),
+  #       axis.text.y=element_blank(),
+  #       axis.ticks.y=element_blank())
+
+p
+
+ggsave("ga_sample.png", plot=p, width=11, height=7)
+
+
+#post_lr <- lapply(as.list(u), function(j){posterior(j, k, al_c, be_c )}) %>% unlist()
+
+lr_ga_x <- lapply(post_lr, which.max)%>%unlist()
+lr_ga <- c()
+for (i in asv_num){
+  lr_ga <- c(lr_ga,u[[i]][lr_ga_x[i]])
+}
+
+# kij_c_lc <- lapply(as.list(lc), function(x){rpois(1, x)}) %>% unlist()
+# 95% credible interval for lc
+# the numbers do not seem correct
+lapply(asv_num, function(i){c(qgamma(.025, shape = al_c[i], rate = be_c[i]), 
+  qgamma(.925, shape = al_c[i], rate = be_c[i]))})
+
+lc<-lapply(asv_num, function(i){rgamma(u[i]%>%unlist(), shape = al_c[i], rate = be_c[i])})
+
+hist(lc[[2]])
+
+#######
+
+start.time<-Sys.time()
+chain <- lapply(asv_num,function(i){MH_MCMC(itera = 1000,
+                            k = as.numeric(gammaPrior_Cont[[sam]]$kij[i]),
+                            al_c = gammaPrior_Cont[[sam]]$alpha_ij_c[i],
+                            be_c = gammaPrior_Cont[[sam]]$beta_ij_c[i],
+                            startvalue_lamda_r =
+ (as.numeric(gammaPrior_Cont[[sam]]$kij[i])-mean(lc[[i]]))
+                            )})
+
+end.time<-Sys.time()
+time.taken_mh<- end.time-start.time
+
+lr_star <- lapply(asv_num,function(i){data.frame(chain[[i]])%>%filter(row_number() %in% 200:length(chain[[i]]))})
+
+lr_star <- lapply(lr_star, unname)
+
+# dont know if it is necessary to unlist
+lr_star <- lapply(lr_star, unlist)
+
+
+quantile(lr_star[[2]], c(0.025, 0.975))
+
+hist(lr_star[[2]])
+
+mean(lr_star[[2]])
+mean(lc[[2]])
+
+## generate the data 
+kij_r_star <- rpois(1, mean(lr_star[[2]]))
+kij_c_star <- rpois(1, mean(lc[[2]]))
+
+kij_r_star+kij_c_star # is it closer to as.numeric(gammaPrior_Cont[[sam]]$kij[taxa])
+as.numeric(gammaPrior_Cont[[sam]]$kij)
+```
+
+### Histogram for Metropolis-Hasting
+```{R}
+# +1 for correct ASV index
+df_mh <- lapply(seq(1,length(lr_star)),function(i){data.frame(x=lr_star[[i]], ASV=(i))})
+
+df_total_mh<-data.frame()
+for (i in seq(2,5)){
+  df_total_mh <- rbind(df_total_mh,df_mh[[i]])
+}
+
+p_mh<-ggplot(data=df_total_mh,
+          aes(x))+
+  geom_histogram(bins=30, aes(color=factor(ASV)), fill="white")+
+  facet_wrap(~ASV, scales = "free", labeller=label_both)+
+  labs(y= "Density", x = "Counts")+
+  xlim(0,max(df_total_mh)+200)+
+  theme_classic() +
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        plot.margin = margin(0.5,0.5,0.5,0.5,"cm"))
+  
+
+p_mh
+
+ggsave("metropolis_hasting.png", plot=p_mh, height=7,width=11)
+
+
+```
+
+### Trace plot for MH
+
+```{R, fig_width=7, fig_height=7}
+count <- chain[[2]][0:500]
+iteration <- seq(1,length(count))
+
+quantile_hist <- quantile(count, probs=.01)
+
+inverse_hist<-ggplot()+
+                geom_histogram(aes(x=chain[[2]]), bins=30, 
+                               color="blue", fill="white")+
+                labs(x="count",y="")+
+                coord_flip() +
+                scale_y_reverse() +
+                theme_classic() +
+                geom_vline(xintercept = as.numeric(quantile(chain[[2]], 
+                                                    probs=c(.001, .999))),
+                           linetype="dashed") +
+                xlim(2050,2350)
+
+trace<- ggplot(tibble(Iteration=iteration,Count=count)) +
+          geom_line(aes(x=Iteration, y=Count), color="blue", alpha=0.7) +
+          theme_classic() +
+          geom_hline(yintercept = as.numeric(
+            quantile(chain[[2]],probs=c(.001, .999))),
+            linetype="dashed") +
+          ylim(2050,2350)
+
+ggsave("hist_trace.png",plot=grid.arrange(inverse_hist,trace, ncol=2), 
+       width=9, height=5)
+
+
+
+##############
+
+trace_v2<- ggplot(tibble(Iteration=seq(1,100),Count=chain[[2]][0:100])) +
+          geom_line(aes(x=Iteration, y=Count), color="blue") +
+          theme_classic()
+
+ggsave("trace.png", plot=trace_v2, width=11, height=7)
+```
+
+Rejection Sampling
+
+```{R, warning=FALSE}
+library(AR)
+
+start.time<-Sys.time()
+
+lr_rs = lapply(seq(2,5), function(i){
+  AR.Sim(n = 200,
+  f_X = function(y){
+    (posterior(y,as.numeric(
+      gammaPrior_Cont[[sam]]$kij[i]),
+               al_c[i],be_c[i]))
+    },
+  Y.dist = "gamma", 
+  Y.dist.par = c((k[i]/mean(lc[[i]]))*al_c[i], be_c[i]),
+  xlim=c(k[i]-2*mean(lc[[i]]),k[i]),
+  Rej.Num = TRUE,
+  Rej.Rate = TRUE,
+  Acc.Rate = FALSE
+)}
+)
+
+end.time<-Sys.time()
+time.taken_rs<- end.time-start.time
+```
+
+### Histogram for rejection sampling output
+
+```{R, fig.width=7, fig.height=7}
+# +1 for correct ASV index
+df_rs <- lapply(seq(1,length(lr_rs)),function(i){data.frame(x=lr_rs[[i]], ASV=(i+1))})
+
+# max_lim <- lapply(lr_rs,max)
+
+df_total_rs<-data.frame()
+for (i in seq(1,4)){
+  df_total_rs <- rbind(df_total_rs,df_rs[[i]])
+}
+
+p_rs<-ggplot(data=df_total_rs,
+          aes(x))+
+  geom_histogram(bins=30, aes(color=factor(ASV)), fill='white')+
+  facet_wrap(~ASV, labeller=label_both, scales = "free")+
+  labs(y= "Density", x = "Counts")+
+  xlim(0,max(df_total_rs)+200)+
+  theme_classic()+
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        plot.margin = margin(0.5,0.5,0.5,0.5,"cm"))
+
+p_rs
+
+ggsave("rejection_sampling.png", plot=p_rs, width=11, height = 7)
+
+
+```
+
+
+## Goodness_of_fit
+
+```{R, fig.width=9,fig.height=11}
+goodness_of_fit <- function(lc,lr, n=c(1,length(lr)), name=NULL){
+  
+  # if (length(n) ==1){
+  #   asv_num <- n
+  # } else {
+  #   asv_num <- seq(n[1],n[2])
+  # }
+  # 
+  index_for_lr <- seq(1,length(lr))
+  
+  kij_c_star <- lapply(n, 
+                       function(i){
+                         rpois(1000,mean(lc[[i]]))
+                         }
+    )
+  
+  kij_r_star <- lapply(index_for_lr, 
+                       function(i){
+                         rpois(1000,mean(lr[[i]]))
+                         }
+                       )
+  kij_star <- mapply("+", kij_c_star,kij_r_star)
+  
+  df_goodness <- data.frame(stack(kij_star))
+  df_subset <- df_goodness[names(df_goodness)%in% c("value","col")]
+  names(df_subset) <- c("ASV","x")
+  
+  if (df_subset$ASV[1] != n[1]){
+    df_subset$ASV <- df_subset$ASV + n[1]-1
+  }
+
+
+p<-ggplot(data=df_subset,aes(x))+
+  geom_histogram(bins=30, aes(color=factor(ASV)), fill="white")+
+  geom_vline(aes(xintercept = 
+                   as.numeric(gammaPrior_Cont[[sam]]$kij[ASV])),
+             linetype="dashed", size=1)+
+  facet_wrap(~ASV, scales = "free",labeller=label_both) +
+  theme_classic() +
+  theme(legend.position = "none",
+        strip.background = element_blank(),
+        plot.margin = margin(0.5,0.5,0.5,0.5,"cm")) +
+  labs(y= " ", x = "Counts") 
+
+return(p)
+
+}
+
+```
+
+## Grid Approximation
+
+```{R}
+#goodness_of_fit(lc,post_lr)
+
+# actual observed counts
+k
+
+# point estimation
+
+a<- lapply(lc,mean)%>%unlist()
+
+a+lr_ga
+
+```
+
+### Rejection Sampling - Goodness of fit Test
+
+```{R, fig.width=7,fig.height=7}
+
+p_good_rs<-goodness_of_fit(lc,lr_rs, n=c(2,5), name="Rejection Sampling")
+
+p_good_rs
+
+ggsave("goodness_rs.png",plot=p_good_rs, width=11, height = 7)
+```
+
+
+### Metropolis-Hasting
+
+```{R, fig.width=7,fig.height=7}
+lr_star_goodness <- lr_star[2:5]
+
+
+p_good_mh <- goodness_of_fit(lc,lr_star_goodness, n=c(2,5), name="Metropolis-Hasting")
+
+p_good_mh
+time.taken_mh
+
+ggsave("goodness_mh.png", plot=p_good_mh, width=11, height = 7)
+```
+
