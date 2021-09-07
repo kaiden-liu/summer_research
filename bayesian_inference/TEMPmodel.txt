@@ -1,0 +1,8 @@
+
+  model {
+    for (i in 1:Ntotal){
+      y[i] ~ dpois(theta)
+    }
+    theta ~ dgamma(5,1)
+  }
+

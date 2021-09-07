@@ -1,0 +1,72 @@
+---
+title: "Gibbs Sampling with RJAGS"
+output: pdf_document
+---
+
+```{R}
+library(rjags)
+library(coda)
+
+set.seed(1999)
+n<-1000
+lambda <- 5
+data<-rpois(n, lambda)
+barplot(table(data)/n,col="blue",main="Poisson distribution n=1000")
+
+y=data
+Ntotal = length(y)
+dataList = list( y=y, Ntotal = Ntotal)
+```
+
+
+```{R}
+modelString = "
+  model {
+    for (i in 1:Ntotal){
+      y[i] ~ dpois(theta)
+    }
+    theta ~ dgamma(5,1)
+  }
+"
+writeLines(modelString,con="TEMPmodel.txt")
+```
+
+### MLE value
+```{R}
+thetaInit = sum(y)/length(y)
+initList = list(theta=thetaInit)
+```
+
+### resample MLE for resampled data (multiple chain)
+${\widehat {\lambda }}_{\mathrm {MLE} }={\frac {1}{n}}\sum _{i=1}^{n}k_{i}\!$
+```{R}
+initsList = function(){
+  resampledY = sample(y, replace =TRUE)
+  thetaInit = sum(resampledY)/length(resampledY)
+  thetaInit = 0.001 + 0.998*thetaInit
+  return(list(theta=thetaInit))
+}
+```
+
+```{R}
+jagsModel = jags.model(file="TEMPmodel.txt", data=dataList, inits=initsList,n.chains=3,
+                       n.adapt=500)
+```
+
+```{R}
+update(jagsModel, n.iter=500)
+```
+
+```{R}
+codaSamples = coda.samples(jagsModel, variable.names=c("theta"), n.iter=3334)
+```
+
+```{r}
+setwd("~/Summer_Research/week/week 5/data")
+source("DBDA2E-utilities.R")
+diagMCMC(codaObject = codaSamples,parName="theta")
+```
+
+```{R}
+plotPost(codaSamples[,"theta"],main="theta",xlab=bquote(theta),cenTend="median",compVal=5.08,ROPE = c(4.96,5.19),credMass=0.90)
+```
